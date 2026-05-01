@@ -5,7 +5,7 @@ title Dynamic Visibility (Filter Plugin) - Installer
 
 set "PLUGIN_NAME=dynamic-visibility"
 set "PLUGIN_DISPLAY=Dynamic Visibility (Filter Plugin)"
-set "PLUGIN_VERSION=1.0.0"
+set "PLUGIN_VERSION=1.1.0"
 set "SCRIPT_DIR=%~dp0"
 set "SCRIPT_DIR=%SCRIPT_DIR:~0,-1%"
 
@@ -13,13 +13,11 @@ echo ============================================================
 echo   %PLUGIN_DISPLAY% v%PLUGIN_VERSION% - Installer
 echo ============================================================
 echo.
-echo Filter fuer Szenen und Gruppen, der Sichtbarkeit der Items
-echo automatisch verwaltet:
-echo   - Exklusiv: nur eine Quelle gleichzeitig sichtbar
-echo   - Hoechstens N: bis zu N gleichzeitig (z. B. 2 Cams)
-echo   - Optional: Mindestens eine Quelle muss sichtbar sein
+echo Zwei Sichtbarkeits-Filter fuer OBS:
+echo   - Source Visibility: steuert Szenen-/Gruppen-Items
+echo   - Filter Visibility: steuert Filter auf derselben Quelle
 echo.
-echo Auf normale Quellen angewandt: zeigt Warnung, keine Wirkung.
+echo Visibility-Controller schuetzen sich gegenseitig automatisch.
 echo.
 
 :ask_path
@@ -62,8 +60,9 @@ if exist "%OBS_DIR%\obs-plugins\64bit\%PLUGIN_NAME%.dll" (echo   [OK] %PLUGIN_NA
 if exist "%OBS_DIR%\data\obs-plugins\%PLUGIN_NAME%\locale\de-DE.ini" (echo   [OK] de-DE.ini) else (echo   [FEHLT] de-DE.ini!)
 if exist "%OBS_DIR%\data\obs-plugins\%PLUGIN_NAME%\locale\en-US.ini" (echo   [OK] en-US.ini) else (echo   [FEHLT] en-US.ini!)
 echo.
-echo OBS neu starten. Auf einer Szene oder Gruppe:
-echo Rechtsklick -^> Filter -^> + -^> "Sichtbarkeits-Regeln".
+echo OBS neu starten. Danach stehen diese Filter zur Verfuegung:
+echo   Source Visibility
+echo   Filter Visibility
 echo.
 pause
 exit /b 0

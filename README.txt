@@ -1,14 +1,16 @@
-Dynamic Visibility - OBS Filter Plugin v1.0.0
+Dynamic Visibility - OBS Filter Plugin v1.1.0
 =============================================
 
-Dynamic Visibility is a filter for OBS scenes and groups that manages the
-visibility state of contained scene items automatically.
+Dynamic Visibility provides two OBS filter controllers:
+
+  - Source Visibility: controls scene items inside scenes and groups
+  - Filter Visibility: controls filters on the same source
 
 
 Package Contents
 ----------------
 
-  dynamic-visibility-1.0.0\
+  dynamic-visibility-1.1.0\
     INSTALL.bat
     README.txt
     obs-plugins\
@@ -36,15 +38,31 @@ into your OBS Studio installation directory.
 Usage
 -----
 
-Add the filter to an OBS scene or group:
+Source Visibility:
 
-  Right-click scene/group -> Filters -> "+" -> Visibility Rules
+  Add this filter to a scene or group to control contained scene items.
+
+  Right-click scene/group -> Filters -> "+" -> Source Visibility
+
+Filter Visibility:
+
+  Add this filter to any source, scene, or group to control the other filters
+  on that same source.
+
+  Right-click source -> Filters -> "+" -> Filter Visibility
 
 Available rule modes:
 
-  - Exclusive: only one item remains visible at a time
-  - Maximum visible count: at most `N` items remain visible
-  - Optional safety rule: at least one item must stay visible
+  - Only one active: only one controlled item remains active at a time
+  - At most N active: at most `N` controlled items remain active
+  - Optional safety rule: at least one controlled item must stay active
+
+Filter Visibility selection:
+
+  - All filters except selected
+  - Only selected filters
+
+Visibility controller filters are always protected.
 
 
 Requirements
