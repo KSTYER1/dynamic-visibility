@@ -42,7 +42,7 @@ jobs:
               ;;
             push)
               config_data=('codesign:true' 'notarize:false' 'package:true' 'config:RelWithDebInfo')
-              if [[ ${GITHUB_REF_NAME} =~ [0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)? ]]; then
+              if [[ ${GITHUB_REF_NAME} =~ ^v?[0-9]+.[0-9]+.[0-9]+(-(rc|beta).+)?$ ]]; then
                 config_data[1]='notarize:true'
                 config_data[3]='config:Release'
               fi
@@ -73,6 +73,7 @@ jobs:
 
   macos-build:
     name: Build for macOS 🍏
+    if: false
     runs-on: macos-15
     needs: check-event
     defaults:
@@ -177,6 +178,7 @@ jobs:
 
   ubuntu-build:
     name: Build for Ubuntu 🐧
+    if: false
     strategy:
       matrix:
         os: [ubuntu-24.04]
