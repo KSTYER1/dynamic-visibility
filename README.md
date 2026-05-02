@@ -1,37 +1,43 @@
 # Dynamic Visibility
 
-Dynamic Visibility is a third-party OBS Studio filter plugin with two
-visibility controllers:
+Dynamic Visibility is a third-party OBS Studio filter plugin for automatically
+managing source visibility inside scenes and groups, plus filter visibility on
+individual sources.
 
-- `Source Visibility` manages scene-item visibility inside scenes and groups.
-- `Filter Visibility` manages enabled filters on the same source.
+It is useful for setups where only one item in a group should be visible, where
+only a limited number of items should remain visible, or where multiple filters
+on the same source need simple visibility rules.
 
-It is useful for mutually exclusive overlays, multi-camera selection logic,
-scene filter presets, and filter stacks where only one look or a limited number
-of effects should be active at once.
+## Filters
+
+### Source Visibility
+
+`Source Visibility` is applied to a scene or group. It controls the visibility
+of scene items inside that scene or group.
+
+### Filter Visibility
+
+`Filter Visibility` is applied to any source. It controls other filters on the
+same source. Visibility filters are protected and are never disabled by this
+filter.
 
 ## Features
 
-- `Source Visibility` for scenes and groups.
-- `Filter Visibility` for sources, scenes, and groups.
-- Exclusive mode so only one controlled item stays active at a time.
-- Maximum-active mode so at most `N` controlled items stay active.
-- Optional rule that at least one controlled item must remain active.
-- Filter selection mode:
-  - control all filters except selected filters
-  - control only selected filters
-- Visibility controller filters are protected automatically.
+- `Only one active` rule.
+- `At most N active` rule.
+- Optional "keep at least one controlled item active" behavior.
+- Source-item control for scenes and groups.
+- Filter control for filters on the same source.
+- Filter selection modes for controlling all normal filters except selected
+  ones, or only selected filters.
 - German and English UI text.
 
 ## Requirements
 
 - OBS Studio 30.x, 31.x, or 32.x
-- Windows x64 for the packaged release
-- Pure `libobs` plugin with no Qt or frontend API dependency
+- Windows 64-bit release build
 
 ## Installation
-
-### Windows
 
 Download the release archive and extract or copy its contents into your OBS
 Studio installation directory.
@@ -44,59 +50,48 @@ data/obs-plugins/dynamic-visibility/locale/en-US.ini
 data/obs-plugins/dynamic-visibility/locale/de-DE.ini
 ```
 
-The packaged release also includes `INSTALL.bat`, which can copy the plugin
-files into a selected OBS directory.
-
-Restart OBS after installation.
+Restart OBS after installation. The filters appear in the filter menu.
 
 ## Basic Usage
 
-### Source Visibility
+1. Add `Source Visibility` to a scene or group to control contained scene
+   items.
+2. Add `Filter Visibility` to a source to control other filters on that source.
+3. Choose the visibility rule.
+4. For `Filter Visibility`, choose whether selected filters are included or
+   excluded.
 
-1. Select a scene or group in OBS.
-2. Open the filter dialog.
-3. Add `Source Visibility`.
-4. Choose either `Only one active` or `At most N active`.
-5. Set the maximum count if needed.
-6. Optionally require that at least one controlled item remains active.
-7. Enable the filter.
+## Building from Source
 
-Once active, the filter reacts to scene-item visibility toggles in that scene
-or group automatically.
+Requires CMake 3.28 or newer, OBS development headers, and a supported compiler
+toolchain.
 
-### Filter Visibility
+```bash
+cmake --preset windows-x64
+cmake --build --preset windows-x64 --config RelWithDebInfo
+```
 
-1. Select any OBS source, scene, or group.
-2. Open the filter dialog.
-3. Add `Filter Visibility`.
-4. Choose which filters should be controlled:
-   - `All filters except selected`
-   - `Only selected filters`
-5. Choose either `Only one active` or `At most N active`.
-6. Optionally require that at least one controlled filter remains active.
-7. Enable or disable one of the controlled filters.
+## Source Code
 
-`Filter Visibility` never controls `Source Visibility`, other
-`Filter Visibility` instances, or itself.
+Source code is available at:
+
+```text
+https://github.com/KSTYER1/dynamic-visibility
+```
 
 ## Version History
 
 ### 1.1.0
 
-- Added `Filter Visibility`.
-- Renamed the original UI entry to `Source Visibility`.
-- Added filter include/exclude style selection.
-- Added German and English UI text for both controllers.
-- Preserved the original internal source visibility ID for compatibility.
+- Renamed the original filter to `Source Visibility`.
+- Added the new `Filter Visibility` filter.
+- Added filter selection controls.
+- Added German and English UI text for both filters.
 
 ### 1.0.0
 
 - Initial release.
-- Ported the original `source-visibility-groups.lua` concept.
-- Added exclusive and maximum-visible modes.
-- Added optional minimum-one-visible protection.
-- Added unsupported-source guard behavior.
-- Added stable scene-item ID tracking.
+- Added scene and group source visibility rules.
 
 ## License
 
@@ -106,3 +101,7 @@ Dynamic Visibility is licensed under GPL-2.0-or-later.
 
 Dynamic Visibility is an unofficial third-party plugin and is not affiliated
 with or endorsed by the OBS Project.
+
+AI-assisted tools were used during development and release preparation. The
+maintainer is responsible for reviewing, testing, and publishing the released
+plugin.
