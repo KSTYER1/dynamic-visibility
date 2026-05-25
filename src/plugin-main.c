@@ -1,7 +1,7 @@
 /*
 Dynamic Visibility — OBS filter that auto-manages scene-item visibility
 according to a chosen rule (Exclusive / At-most-N / Always-one-visible).
-Copyright (C) 2026 K_STYER, GPLv2 or later.
+Copyright (C) 2026 K_STYER1, GPLv2 or later.
 */
 
 #include <obs-module.h>
@@ -22,7 +22,7 @@ MODULE_EXPORT const char *obs_module_name(void)
 
 MODULE_EXPORT const char *obs_module_author(void)
 {
-	return "K_STYER";
+	return "K_STYER1";
 }
 
 extern struct obs_source_info dynamic_visibility_filter_info;
