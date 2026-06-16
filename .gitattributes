@@ -1,0 +1,3 @@
+build-aux/run-* text eol=lf
+build-aux/*.zsh text eol=lf
+*.zsh text eol=lf
