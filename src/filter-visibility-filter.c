@@ -265,7 +265,7 @@ static void refresh_selected_from_settings(struct filter_vis *f, obs_data_t *set
 	if (!parent)
 		return;
 
-	struct selection_ctx ctx = { f, settings };
+	struct selection_ctx ctx = {f, settings};
 	obs_source_enum_filters(parent, collect_selected_cb, &ctx);
 	obs_source_release(parent);
 }
@@ -295,7 +295,7 @@ static void rebuild_snapshot(struct filter_vis *f)
 	if (!parent)
 		return;
 
-	struct snapshot_ctx ctx = { f };
+	struct snapshot_ctx ctx = {f};
 	obs_source_enum_filters(parent, snapshot_cb, &ctx);
 	obs_source_release(parent);
 }
@@ -316,7 +316,7 @@ static void count_active_cb(obs_source_t *parent, obs_source_t *child, void *par
 
 static int count_active(struct filter_vis *f)
 {
-	struct count_ctx ctx = { f, 0 };
+	struct count_ctx ctx = {f, 0};
 	obs_source_t *parent = get_parent_ref(f);
 	if (parent) {
 		obs_source_enum_filters(parent, count_active_cb, &ctx);
@@ -411,8 +411,8 @@ static void apply_on_enable(struct filter_vis *f, const char *enabled_name)
 	f->applying = true;
 
 	if (streq(f->mode, MODE_EXCLUSIVE)) {
-		struct name_list to_hide = { 0 };
-		struct hide_others_ctx ctx = { f, enabled_name, &to_hide };
+		struct name_list to_hide = {0};
+		struct hide_others_ctx ctx = {f, enabled_name, &to_hide};
 		obs_source_enum_filters(parent, hide_others_cb, &ctx);
 		for (size_t i = 0; i < to_hide.count; i++) {
 			set_filter_enabled_by_name(f, to_hide.names[i], false);
@@ -422,7 +422,7 @@ static void apply_on_enable(struct filter_vis *f, const char *enabled_name)
 	} else if (streq(f->mode, MODE_MAX_N)) {
 		int max_n = f->max_n < 1 ? 1 : f->max_n;
 		while (count_active(f) > max_n) {
-			struct oldest_ctx ctx = { f, enabled_name, NULL, 0 };
+			struct oldest_ctx ctx = {f, enabled_name, NULL, 0};
 			obs_source_enum_filters(parent, find_oldest_cb, &ctx);
 			if (!ctx.found_name)
 				break;
@@ -455,7 +455,7 @@ static void apply_current_policy(struct filter_vis *f)
 
 	f->applying = true;
 	while (count_active(f) > limit) {
-		struct oldest_ctx ctx = { f, NULL, NULL, 0 };
+		struct oldest_ctx ctx = {f, NULL, NULL, 0};
 		obs_source_enum_filters(parent, find_oldest_cb, &ctx);
 		if (!ctx.found_name)
 			break;
@@ -629,8 +629,7 @@ static void fv_defaults(obs_data_t *settings)
 	obs_data_set_default_bool(settings, "always_one", false);
 }
 
-static bool fv_mode_modified(obs_properties_t *props, obs_property_t *prop,
-			     obs_data_t *settings)
+static bool fv_mode_modified(obs_properties_t *props, obs_property_t *prop, obs_data_t *settings)
 {
 	UNUSED_PARAMETER(prop);
 
@@ -672,42 +671,36 @@ static obs_properties_t *fv_properties(void *data)
 	if (f)
 		pthread_mutex_lock(&f->state_mutex);
 
-	obs_properties_add_text(props, "info", obs_module_text("FilterVisibilityInfo"),
-				OBS_TEXT_INFO);
+	obs_properties_add_text(props, "info", obs_module_text("FilterVisibilityInfo"), OBS_TEXT_INFO);
 
-	obs_property_t *p_mode = obs_properties_add_list(
-		props, "mode", obs_module_text("Mode"), OBS_COMBO_TYPE_LIST,
-		OBS_COMBO_FORMAT_STRING);
+	obs_property_t *p_mode = obs_properties_add_list(props, "mode", obs_module_text("Mode"), OBS_COMBO_TYPE_LIST,
+							 OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p_mode, obs_module_text("ModeExclusive"), MODE_EXCLUSIVE);
 	obs_property_list_add_string(p_mode, obs_module_text("ModeMaxN"), MODE_MAX_N);
 	obs_property_set_modified_callback(p_mode, fv_mode_modified);
 
-	obs_property_t *p_max_n =
-		obs_properties_add_int(props, "max_n", obs_module_text("MaxN"), 1, 20, 1);
+	obs_property_t *p_max_n = obs_properties_add_int(props, "max_n", obs_module_text("MaxN"), 1, 20, 1);
 	obs_property_set_visible(p_max_n, f && f->mode && strcmp(f->mode, MODE_MAX_N) == 0);
 	obs_properties_add_bool(props, "always_one", obs_module_text("AlwaysOne"));
 
-	obs_property_t *p_control = obs_properties_add_list(
-		props, "control_mode", obs_module_text("ControlledFilters"),
-		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_t *p_control = obs_properties_add_list(props, "control_mode", obs_module_text("ControlledFilters"),
+							    OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p_control, obs_module_text("ControlAllExceptSelected"),
 				     CONTROL_ALL_EXCEPT_SELECTED);
-	obs_property_list_add_string(p_control, obs_module_text("ControlOnlySelected"),
-				     CONTROL_ONLY_SELECTED);
+	obs_property_list_add_string(p_control, obs_module_text("ControlOnlySelected"), CONTROL_ONLY_SELECTED);
 
 	obs_properties_t *selection = obs_properties_create();
 	obs_source_t *parent = get_parent_ref(f);
 	if (parent) {
-		struct props_ctx ctx = { f, selection };
+		struct props_ctx ctx = {f, selection};
 		obs_source_enum_filters(parent, add_filter_checkbox_cb, &ctx);
 		obs_source_release(parent);
 	} else {
-		obs_properties_add_text(selection, "no_parent",
-					obs_module_text("FilterVisibilityNoParent"),
+		obs_properties_add_text(selection, "no_parent", obs_module_text("FilterVisibilityNoParent"),
 					OBS_TEXT_INFO);
 	}
-	obs_properties_add_group(props, "filter_selection", obs_module_text("FilterSelection"),
-				 OBS_GROUP_NORMAL, selection);
+	obs_properties_add_group(props, "filter_selection", obs_module_text("FilterSelection"), OBS_GROUP_NORMAL,
+				 selection);
 
 	if (f)
 		pthread_mutex_unlock(&f->state_mutex);
@@ -739,7 +732,7 @@ static void fv_video_tick(void *data, float seconds)
 	if (f->applying)
 		goto done;
 
-	struct detect_ctx ctx = { f, NULL, false };
+	struct detect_ctx ctx = {f, NULL, false};
 	obs_source_t *parent = get_parent_ref(f);
 	if (!parent)
 		goto done;
