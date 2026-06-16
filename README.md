@@ -10,14 +10,14 @@ on the same source need simple visibility rules.
 
 ## Filters
 
-### Source Visibility
+### Dynamic Visibility Source
 
-`Source Visibility` is applied to a scene or group. It controls the visibility
+`Dynamic Visibility Source` is applied to a scene or group. It controls the visibility
 of scene items inside that scene or group.
 
-### Filter Visibility
+### Dynamic Visibility Filter
 
-`Filter Visibility` is applied to any source. It controls other filters on the
+`Dynamic Visibility Filter` is applied to any source. It controls other filters on the
 same source. Visibility filters are protected and are never disabled by this
 filter.
 
@@ -39,20 +39,6 @@ filter.
 
 ## Installation
 
-Recommended installer:
-
-1. Download the `*-setup.exe` file from the latest GitHub release.
-2. Close OBS Studio.
-3. Run the installer and select your OBS Studio installation folder.
-4. Start OBS Studio again.
-
-Portable or manual installation:
-
-1. Download the release ZIP instead of the setup EXE.
-2. Extract the ZIP into your OBS Studio installation folder, or copy the
-   included `obs-plugins` and `data` folders into it.
-3. Start OBS Studio again.
-
 Download the release archive and extract or copy its contents into your OBS
 Studio installation directory.
 
@@ -68,11 +54,11 @@ Restart OBS after installation. The filters appear in the filter menu.
 
 ## Basic Usage
 
-1. Add `Source Visibility` to a scene or group to control contained scene
+1. Add `Dynamic Visibility Source` to a scene or group to control contained scene
    items.
-2. Add `Filter Visibility` to a source to control other filters on that source.
+2. Add `Dynamic Visibility Filter` to a source to control other filters on that source.
 3. Choose the visibility rule.
-4. For `Filter Visibility`, choose whether selected filters are included or
+4. For `Dynamic Visibility Filter`, choose whether selected filters are included or
    excluded.
 
 ## Building from Source
@@ -95,10 +81,17 @@ https://github.com/KSTYER1/dynamic-visibility
 
 ## Version History
 
+### 1.1.1
+
+- Fixed a `Dynamic Visibility Filter` tick-path deadlock where unchanged or
+  missing parent state could return while holding the state mutex.
+- Fixed plugin log prefix formatting so messages are not truncated.
+- Replaced stale OBS template metadata in generated support files.
+
 ### 1.1.0
 
-- Renamed the original filter to `Source Visibility`.
-- Added the new `Filter Visibility` filter.
+- Renamed the original filter to `Dynamic Visibility Source`.
+- Added the new `Dynamic Visibility Filter` filter.
 - Added filter selection controls.
 - Added German and English UI text for both filters.
 

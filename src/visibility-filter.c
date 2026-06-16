@@ -15,6 +15,7 @@
 #include <plugin-support.h>
 #include <util/bmem.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <stdlib.h>
 #include <string.h>
@@ -23,24 +24,26 @@
 #define MODE_MAX_N      "max_n"
 
 #define MAX_TRACKED     128
+#define MAX_ITEM_REFS   256
 
 struct visible_entry {
-	int64_t  sceneitem_id;
+	int64_t sceneitem_id;
 	uint64_t since_ns;
 };
 
 struct vis_filter {
 	obs_source_t *self;
+	pthread_mutex_t state_mutex;
 
 	/* settings */
 	char *mode;
-	int   max_n;
-	bool  always_one;
+	int max_n;
+	bool always_one;
 
 	/* parent type */
-	bool  parent_valid;
-	obs_source_t *parent_src;
-	bool  signal_connected;
+	bool parent_valid;
+	obs_weak_source_t *parent;
+	bool signal_connected;
 
 	/* activation tracking for max_n eviction */
 	struct visible_entry order[MAX_TRACKED];
@@ -54,6 +57,17 @@ struct vis_filter {
 };
 
 /* ---------- helpers ---------- */
+
+static bool init_recursive_mutex(pthread_mutex_t *mutex)
+{
+	pthread_mutexattr_t attr;
+	if (pthread_mutexattr_init(&attr) != 0)
+		return false;
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	int ret = pthread_mutex_init(mutex, &attr);
+	pthread_mutexattr_destroy(&attr);
+	return ret == 0;
+}
 
 static bool parent_is_scene_or_group(obs_source_t *parent)
 {
@@ -73,6 +87,11 @@ static obs_scene_t *parent_as_scene(obs_source_t *parent)
 	if (s)
 		return s;
 	return obs_group_from_source(parent);
+}
+
+static obs_source_t *get_parent_ref(struct vis_filter *f)
+{
+	return (f && f->parent) ? obs_weak_source_get_source(f->parent) : NULL;
 }
 
 static int find_order_index(struct vis_filter *f, int64_t id)
@@ -118,6 +137,72 @@ static void order_remove(struct vis_filter *f, int64_t id)
 	f->order_count--;
 }
 
+static void order_add_missing(struct vis_filter *f, int64_t id)
+{
+	if (find_order_index(f, id) >= 0)
+		return;
+
+	uint64_t now = os_gettime_ns();
+	if (f->order_count < MAX_TRACKED) {
+		f->order[f->order_count].sceneitem_id = id;
+		f->order[f->order_count].since_ns = now;
+		f->order_count++;
+	}
+}
+
+static bool id_in_list(const int64_t *ids, size_t count, int64_t id)
+{
+	for (size_t i = 0; i < count; i++) {
+		if (ids[i] == id)
+			return true;
+	}
+	return false;
+}
+
+struct sceneitem_ref_list {
+	obs_sceneitem_t *items[MAX_ITEM_REFS];
+	size_t count;
+};
+
+static void sceneitem_ref_list_add(struct sceneitem_ref_list *list, obs_sceneitem_t *item)
+{
+	if (!list || !item || list->count >= MAX_ITEM_REFS)
+		return;
+
+	obs_sceneitem_addref(item);
+	list->items[list->count++] = item;
+}
+
+static void sceneitem_ref_list_release(struct sceneitem_ref_list *list)
+{
+	if (!list)
+		return;
+
+	for (size_t i = 0; i < list->count; i++)
+		obs_sceneitem_release(list->items[i]);
+	list->count = 0;
+}
+
+static size_t sceneitem_ref_list_set_visible(struct vis_filter *f, struct sceneitem_ref_list *list, bool visible)
+{
+	size_t changed = 0;
+
+	for (size_t i = 0; i < list->count; i++) {
+		obs_sceneitem_t *item = list->items[i];
+		int64_t id = obs_sceneitem_get_id(item);
+
+		if (obs_sceneitem_set_visible(item, visible)) {
+			changed++;
+			if (visible)
+				order_touch(f, id);
+			else
+				order_remove(f, id);
+		}
+	}
+
+	return changed;
+}
+
 /* Enumeration helpers using obs_scene_enum_items. */
 
 struct count_visible_ctx {
@@ -139,14 +224,14 @@ static bool count_visible_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *pa
 
 static int count_visible(obs_scene_t *scene, int64_t exclude_id)
 {
-	struct count_visible_ctx c = { 0, exclude_id };
+	struct count_visible_ctx c = {0, exclude_id};
 	obs_scene_enum_items(scene, count_visible_cb, &c);
 	return c.count;
 }
 
 struct hide_others_ctx {
-	struct vis_filter *f;
 	int64_t keep_id;
+	struct sceneitem_ref_list *items;
 };
 
 static bool hide_others_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
@@ -156,16 +241,14 @@ static bool hide_others_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *para
 	int64_t id = obs_sceneitem_get_id(item);
 	if (id == c->keep_id)
 		return true;
-	if (obs_sceneitem_visible(item)) {
-		obs_sceneitem_set_visible(item, false);
-		order_remove(c->f, id);
-	}
+	if (obs_sceneitem_visible(item))
+		sceneitem_ref_list_add(c->items, item);
 	return true;
 }
 
 struct find_oldest_visible_ctx {
 	struct vis_filter *f;
-	int64_t keep_id;          /* don't pick this one */
+	int64_t keep_id; /* don't pick this one */
 	int64_t found_id;
 	uint64_t found_since;
 };
@@ -190,6 +273,7 @@ static bool find_oldest_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *para
 
 struct hide_by_id_ctx {
 	int64_t target_id;
+	struct sceneitem_ref_list *items;
 };
 
 static bool hide_by_id_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
@@ -197,7 +281,7 @@ static bool hide_by_id_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param
 	(void)scene;
 	struct hide_by_id_ctx *c = param;
 	if (obs_sceneitem_get_id(item) == c->target_id) {
-		obs_sceneitem_set_visible(item, false);
+		sceneitem_ref_list_add(c->items, item);
 		return false; /* stop */
 	}
 	return true;
@@ -205,6 +289,7 @@ static bool hide_by_id_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param
 
 struct show_by_id_ctx {
 	int64_t target_id;
+	struct sceneitem_ref_list *items;
 };
 
 static bool show_by_id_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
@@ -212,39 +297,82 @@ static bool show_by_id_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param
 	(void)scene;
 	struct show_by_id_ctx *c = param;
 	if (obs_sceneitem_get_id(item) == c->target_id) {
-		obs_sceneitem_set_visible(item, true);
+		sceneitem_ref_list_add(c->items, item);
 		return false;
 	}
 	return true;
 }
 
-/* Snapshot all currently-visible items into the order table. */
-static bool snapshot_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
+struct visible_ids_ctx {
+	int64_t ids[MAX_TRACKED];
+	size_t count;
+};
+
+static bool visible_ids_cb(obs_scene_t *scene, obs_sceneitem_t *item, void *param)
 {
 	(void)scene;
-	struct vis_filter *f = param;
-	if (obs_sceneitem_visible(item))
-		order_touch(f, obs_sceneitem_get_id(item));
+	struct visible_ids_ctx *c = param;
+	if (obs_sceneitem_visible(item) && c->count < MAX_TRACKED)
+		c->ids[c->count++] = obs_sceneitem_get_id(item);
 	return true;
+}
+
+/* Snapshot currently-visible items while preserving existing activation order. */
+static void snapshot_visible_items(struct vis_filter *f, obs_scene_t *scene)
+{
+	struct visible_ids_ctx c = {0};
+	obs_scene_enum_items(scene, visible_ids_cb, &c);
+
+	for (size_t i = 0; i < f->order_count;) {
+		if (id_in_list(c.ids, c.count, f->order[i].sceneitem_id)) {
+			i++;
+		} else {
+			order_remove(f, f->order[i].sceneitem_id);
+		}
+	}
+
+	for (size_t i = 0; i < c.count; i++)
+		order_add_missing(f, c.ids[i]);
+}
+
+static int64_t newest_visible_id(struct vis_filter *f)
+{
+	if (f->order_count == 0)
+		return 0;
+
+	int64_t newest_id = f->order[0].sceneitem_id;
+	uint64_t newest_since = f->order[0].since_ns;
+	for (size_t i = 1; i < f->order_count; i++) {
+		if (f->order[i].since_ns > newest_since) {
+			newest_since = f->order[i].since_ns;
+			newest_id = f->order[i].sceneitem_id;
+		}
+	}
+	return newest_id;
 }
 
 /* ---------- mode logic ---------- */
 
 static void apply_on_show(struct vis_filter *f, int64_t shown_id)
 {
-	obs_source_t *parent = f->parent_src;
+	obs_source_t *parent = get_parent_ref(f);
 	if (!parent)
 		return;
 	obs_scene_t *scene = parent_as_scene(parent);
-	if (!scene)
+	if (!scene) {
+		obs_source_release(parent);
 		return;
+	}
 
 	order_touch(f, shown_id);
 
 	if (strcmp(f->mode, MODE_EXCLUSIVE) == 0) {
+		struct sceneitem_ref_list items = {0};
+		struct hide_others_ctx hc = {shown_id, &items};
 		f->applying = true;
-		struct hide_others_ctx hc = { f, shown_id };
 		obs_scene_enum_items(scene, hide_others_cb, &hc);
+		sceneitem_ref_list_set_visible(f, &items, false);
+		sceneitem_ref_list_release(&items);
 		f->applying = false;
 	} else if (strcmp(f->mode, MODE_MAX_N) == 0) {
 		int max_n = f->max_n < 1 ? 1 : f->max_n;
@@ -254,16 +382,23 @@ static void apply_on_show(struct vis_filter *f, int64_t shown_id)
 			int visible_count = count_visible(scene, -1);
 			if (visible_count <= max_n)
 				break;
-			struct find_oldest_visible_ctx fc = { f, shown_id, 0, 0 };
+			struct find_oldest_visible_ctx fc = {f, shown_id, 0, 0};
 			obs_scene_enum_items(scene, find_oldest_cb, &fc);
 			if (fc.found_id == 0)
 				break; /* nothing else to hide */
-			struct hide_by_id_ctx hc = { fc.found_id };
+			struct sceneitem_ref_list items = {0};
+			struct hide_by_id_ctx hc = {fc.found_id, &items};
 			obs_scene_enum_items(scene, hide_by_id_cb, &hc);
-			order_remove(f, fc.found_id);
+			if (sceneitem_ref_list_set_visible(f, &items, false) == 0) {
+				sceneitem_ref_list_release(&items);
+				break;
+			}
+			sceneitem_ref_list_release(&items);
 		}
 		f->applying = false;
 	}
+
+	obs_source_release(parent);
 }
 
 static void apply_on_hide(struct vis_filter *f, int64_t hidden_id)
@@ -273,18 +408,35 @@ static void apply_on_hide(struct vis_filter *f, int64_t hidden_id)
 	if (!f->always_one)
 		return;
 
-	obs_source_t *parent = f->parent_src;
+	obs_source_t *parent = get_parent_ref(f);
 	if (!parent)
 		return;
 	obs_scene_t *scene = parent_as_scene(parent);
-	if (!scene)
+	if (!scene) {
+		obs_source_release(parent);
 		return;
+	}
 
 	int visible_count = count_visible(scene, -1);
 	if (visible_count == 0) {
 		/* defer to next tick to avoid signal recursion */
 		f->pending_restore_id = hidden_id;
 	}
+
+	obs_source_release(parent);
+}
+
+static void enforce_current_visibility(struct vis_filter *f, obs_scene_t *scene)
+{
+	if (!f || !scene || !f->mode)
+		return;
+	if (strcmp(f->mode, MODE_EXCLUSIVE) != 0 && strcmp(f->mode, MODE_MAX_N) != 0)
+		return;
+
+	snapshot_visible_items(f, scene);
+	int64_t anchor_id = newest_visible_id(f);
+	if (anchor_id != 0)
+		apply_on_show(f, anchor_id);
 }
 
 /* ---------- signal handler ---------- */
@@ -292,44 +444,60 @@ static void apply_on_hide(struct vis_filter *f, int64_t hidden_id)
 static void on_item_visible_cb(void *data, calldata_t *cd)
 {
 	struct vis_filter *f = data;
+	pthread_mutex_lock(&f->state_mutex);
 	if (f->applying)
-		return;
+		goto done;
 	if (!obs_source_enabled(f->self))
-		return;
+		goto done;
 
 	obs_sceneitem_t *item = NULL;
 	bool visible = false;
 	calldata_get_ptr(cd, "item", (void **)&item);
 	calldata_get_bool(cd, "visible", &visible);
 	if (!item)
-		return;
+		goto done;
 
 	int64_t id = obs_sceneitem_get_id(item);
 	if (visible)
 		apply_on_show(f, id);
 	else
 		apply_on_hide(f, id);
+
+done:
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void connect_signal(struct vis_filter *f)
 {
-	if (f->signal_connected || !f->parent_src)
+	if (f->signal_connected || !f->parent)
 		return;
-	signal_handler_t *sh = obs_source_get_signal_handler(f->parent_src);
-	if (!sh)
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
 		return;
+	signal_handler_t *sh = obs_source_get_signal_handler(parent);
+	if (!sh) {
+		obs_source_release(parent);
+		return;
+	}
 	signal_handler_connect(sh, "item_visible", on_item_visible_cb, f);
 	f->signal_connected = true;
+	obs_source_release(parent);
 }
 
 static void disconnect_signal(struct vis_filter *f)
 {
-	if (!f->signal_connected || !f->parent_src)
+	if (!f->signal_connected || !f->parent)
 		return;
-	signal_handler_t *sh = obs_source_get_signal_handler(f->parent_src);
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent) {
+		f->signal_connected = false;
+		return;
+	}
+	signal_handler_t *sh = obs_source_get_signal_handler(parent);
 	if (sh)
 		signal_handler_disconnect(sh, "item_visible", on_item_visible_cb, f);
 	f->signal_connected = false;
+	obs_source_release(parent);
 }
 
 /* ---------- OBS API callbacks ---------- */
@@ -343,6 +511,7 @@ static const char *vis_get_name(void *unused)
 static void vis_update(void *data, obs_data_t *settings)
 {
 	struct vis_filter *f = data;
+	pthread_mutex_lock(&f->state_mutex);
 
 	bfree(f->mode);
 	f->mode = bstrdup(obs_data_get_string(settings, "mode"));
@@ -358,22 +527,24 @@ static void vis_update(void *data, obs_data_t *settings)
 	/* Re-evaluate visibility after a setting change so the new rule sticks
 	 * immediately. We use the most-recently-touched item in order[] as the
 	 * "anchor" for apply_on_show — that's whatever the user last activated. */
-	if (f->parent_valid && f->order_count > 0) {
-		int64_t newest_id = f->order[0].sceneitem_id;
-		uint64_t newest_since = f->order[0].since_ns;
-		for (size_t i = 1; i < f->order_count; i++) {
-			if (f->order[i].since_ns > newest_since) {
-				newest_since = f->order[i].since_ns;
-				newest_id = f->order[i].sceneitem_id;
-			}
-		}
-		apply_on_show(f, newest_id);
+	if (f->parent_valid) {
+		obs_source_t *parent = get_parent_ref(f);
+		obs_scene_t *scene = parent_as_scene(parent);
+		if (scene)
+			enforce_current_visibility(f, scene);
+		if (parent)
+			obs_source_release(parent);
 	}
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void *vis_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct vis_filter *f = bzalloc(sizeof(struct vis_filter));
+	if (!init_recursive_mutex(&f->state_mutex)) {
+		bfree(f);
+		return NULL;
+	}
 	f->self = source;
 	f->mode = bstrdup(MODE_EXCLUSIVE);
 	f->max_n = 2;
@@ -390,25 +561,37 @@ static void *vis_create(obs_data_t *settings, obs_source_t *source)
 static void vis_filter_add(void *data, obs_source_t *parent)
 {
 	struct vis_filter *f = data;
-	f->parent_src = parent;
+	pthread_mutex_lock(&f->state_mutex);
+	disconnect_signal(f);
+	if (f->parent) {
+		obs_weak_source_release(f->parent);
+		f->parent = NULL;
+	}
+	f->parent = obs_source_get_weak_source(parent);
 	f->parent_valid = parent_is_scene_or_group(parent);
 
 	if (f->parent_valid) {
 		connect_signal(f);
 		obs_scene_t *scene = parent_as_scene(parent);
 		if (scene)
-			obs_scene_enum_items(scene, snapshot_cb, f);
+			enforce_current_visibility(f, scene);
 	}
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void vis_filter_remove(void *data, obs_source_t *parent)
 {
 	UNUSED_PARAMETER(parent);
 	struct vis_filter *f = data;
+	pthread_mutex_lock(&f->state_mutex);
 	disconnect_signal(f);
 	f->parent_valid = false;
-	f->parent_src = NULL;
+	if (f->parent) {
+		obs_weak_source_release(f->parent);
+		f->parent = NULL;
+	}
 	f->order_count = 0;
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void vis_destroy(void *data)
@@ -416,8 +599,13 @@ static void vis_destroy(void *data)
 	struct vis_filter *f = data;
 	if (!f)
 		return;
+	pthread_mutex_lock(&f->state_mutex);
 	disconnect_signal(f);
+	if (f->parent)
+		obs_weak_source_release(f->parent);
 	bfree(f->mode);
+	pthread_mutex_unlock(&f->state_mutex);
+	pthread_mutex_destroy(&f->state_mutex);
 	bfree(f);
 }
 
@@ -444,26 +632,30 @@ static obs_properties_t *vis_properties(void *data)
 	struct vis_filter *f = data;
 	obs_properties_t *props = obs_properties_create();
 
+	if (f)
+		pthread_mutex_lock(&f->state_mutex);
+
 	if (!f || !f->parent_valid) {
 		/* Warning-only UI for misapplied filter. */
-		obs_property_t *warn = obs_properties_add_text(props, "warning",
-			obs_module_text("WarningTitle"), OBS_TEXT_INFO);
+		obs_property_t *warn =
+			obs_properties_add_text(props, "warning", obs_module_text("WarningTitle"), OBS_TEXT_INFO);
 		obs_property_set_long_description(warn, obs_module_text("WarningHelp"));
+		if (f)
+			pthread_mutex_unlock(&f->state_mutex);
 		return props;
 	}
 
-	obs_property_t *p_mode = obs_properties_add_list(props, "mode",
-		obs_module_text("Mode"),
-		OBS_COMBO_TYPE_LIST, OBS_COMBO_FORMAT_STRING);
+	obs_property_t *p_mode = obs_properties_add_list(props, "mode", obs_module_text("Mode"), OBS_COMBO_TYPE_LIST,
+							 OBS_COMBO_FORMAT_STRING);
 	obs_property_list_add_string(p_mode, obs_module_text("ModeExclusive"), MODE_EXCLUSIVE);
 	obs_property_list_add_string(p_mode, obs_module_text("ModeMaxN"), MODE_MAX_N);
 	obs_property_set_modified_callback(p_mode, mode_modified);
 
-	obs_property_t *p_max_n =
-		obs_properties_add_int(props, "max_n", obs_module_text("MaxN"), 1, 20, 1);
+	obs_property_t *p_max_n = obs_properties_add_int(props, "max_n", obs_module_text("MaxN"), 1, 20, 1);
 	obs_property_set_visible(p_max_n, f && f->mode && strcmp(f->mode, MODE_MAX_N) == 0);
 	obs_properties_add_bool(props, "always_one", obs_module_text("AlwaysOne"));
 
+	pthread_mutex_unlock(&f->state_mutex);
 	return props;
 }
 
@@ -473,19 +665,28 @@ static void vis_video_tick(void *data, float seconds)
 {
 	UNUSED_PARAMETER(seconds);
 	struct vis_filter *f = data;
+	pthread_mutex_lock(&f->state_mutex);
 	if (!f->parent_valid)
-		return;
+		goto done;
 	if (f->pending_restore_id != 0) {
-		obs_scene_t *scene = parent_as_scene(f->parent_src);
+		obs_source_t *parent = get_parent_ref(f);
+		obs_scene_t *scene = parent_as_scene(parent);
 		if (scene) {
+			struct sceneitem_ref_list items = {0};
+			struct show_by_id_ctx c = {f->pending_restore_id, &items};
 			f->applying = true;
-			struct show_by_id_ctx c = { f->pending_restore_id };
 			obs_scene_enum_items(scene, show_by_id_cb, &c);
+			sceneitem_ref_list_set_visible(f, &items, true);
+			sceneitem_ref_list_release(&items);
 			f->applying = false;
-			order_touch(f, f->pending_restore_id);
 		}
+		if (parent)
+			obs_source_release(parent);
 		f->pending_restore_id = 0;
 	}
+
+done:
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void vis_video_render(void *data, gs_effect_t *effect)
@@ -496,17 +697,17 @@ static void vis_video_render(void *data, gs_effect_t *effect)
 }
 
 struct obs_source_info dynamic_visibility_filter_info = {
-	.id             = "dynamic_visibility_filter",
-	.type           = OBS_SOURCE_TYPE_FILTER,
-	.output_flags   = OBS_SOURCE_VIDEO,
-	.get_name       = vis_get_name,
-	.create         = vis_create,
-	.destroy        = vis_destroy,
-	.update         = vis_update,
-	.get_defaults   = vis_defaults,
+	.id = "dynamic_visibility_filter",
+	.type = OBS_SOURCE_TYPE_FILTER,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
+	.get_name = vis_get_name,
+	.create = vis_create,
+	.destroy = vis_destroy,
+	.update = vis_update,
+	.get_defaults = vis_defaults,
 	.get_properties = vis_properties,
-	.filter_add     = vis_filter_add,
-	.filter_remove  = vis_filter_remove,
-	.video_tick     = vis_video_tick,
-	.video_render   = vis_video_render,
+	.filter_add = vis_filter_add,
+	.filter_remove = vis_filter_remove,
+	.video_tick = vis_video_tick,
+	.video_render = vis_video_render,
 };
