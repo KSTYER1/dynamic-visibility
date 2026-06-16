@@ -6,6 +6,7 @@
 #include <plugin-support.h>
 #include <util/bmem.h>
 #include <util/platform.h>
+#include <util/threading.h>
 
 #include <inttypes.h>
 #include <stdint.h>
@@ -31,7 +32,8 @@ struct tracked_filter {
 
 struct filter_vis {
 	obs_source_t *self;
-	obs_source_t *parent_src;
+	pthread_mutex_t state_mutex;
+	obs_weak_source_t *parent_src;
 
 	char *mode;
 	char *control_mode;
@@ -46,6 +48,22 @@ struct filter_vis {
 
 	char *pending_restore_name;
 	bool applying;
+};
+
+static bool init_recursive_mutex(pthread_mutex_t *mutex)
+{
+	pthread_mutexattr_t attr;
+	if (pthread_mutexattr_init(&attr) != 0)
+		return false;
+	pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE);
+	int ret = pthread_mutex_init(mutex, &attr);
+	pthread_mutexattr_destroy(&attr);
+	return ret == 0;
+}
+
+struct name_list {
+	char *names[MAX_TRACKED];
+	size_t count;
 };
 
 static uint64_t fnv1a64(const char *s)
@@ -66,6 +84,25 @@ static void make_select_key(const char *name, char *out, size_t out_size)
 static bool streq(const char *a, const char *b)
 {
 	return a && b && strcmp(a, b) == 0;
+}
+
+static obs_source_t *get_parent_ref(struct filter_vis *f)
+{
+	return f && f->parent_src ? obs_weak_source_get_source(f->parent_src) : NULL;
+}
+
+static void name_list_clear(struct name_list *list)
+{
+	for (size_t i = 0; i < list->count; i++)
+		bfree(list->names[i]);
+	list->count = 0;
+}
+
+static void name_list_add(struct name_list *list, const char *name)
+{
+	if (!list || !name || !*name || list->count >= MAX_TRACKED)
+		return;
+	list->names[list->count++] = bstrdup(name);
 }
 
 static bool is_visibility_filter(obs_source_t *source)
@@ -221,11 +258,16 @@ static void collect_selected_cb(obs_source_t *parent, obs_source_t *child, void 
 static void refresh_selected_from_settings(struct filter_vis *f, obs_data_t *settings)
 {
 	selected_clear(f);
-	if (!f->parent_src || !settings)
+	if (!settings)
+		return;
+
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
 		return;
 
 	struct selection_ctx ctx = { f, settings };
-	obs_source_enum_filters(f->parent_src, collect_selected_cb, &ctx);
+	obs_source_enum_filters(parent, collect_selected_cb, &ctx);
+	obs_source_release(parent);
 }
 
 struct snapshot_ctx {
@@ -249,11 +291,13 @@ static void snapshot_cb(obs_source_t *parent, obs_source_t *child, void *param)
 static void rebuild_snapshot(struct filter_vis *f)
 {
 	order_clear(f);
-	if (!f->parent_src)
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
 		return;
 
 	struct snapshot_ctx ctx = { f };
-	obs_source_enum_filters(f->parent_src, snapshot_cb, &ctx);
+	obs_source_enum_filters(parent, snapshot_cb, &ctx);
+	obs_source_release(parent);
 }
 
 struct count_ctx {
@@ -273,42 +317,41 @@ static void count_active_cb(obs_source_t *parent, obs_source_t *child, void *par
 static int count_active(struct filter_vis *f)
 {
 	struct count_ctx ctx = { f, 0 };
-	if (f->parent_src)
-		obs_source_enum_filters(f->parent_src, count_active_cb, &ctx);
+	obs_source_t *parent = get_parent_ref(f);
+	if (parent) {
+		obs_source_enum_filters(parent, count_active_cb, &ctx);
+		obs_source_release(parent);
+	}
 	return ctx.count;
-}
-
-struct set_enabled_ctx {
-	struct filter_vis *f;
-	const char *name;
-	bool enabled;
-};
-
-static void set_enabled_by_name_cb(obs_source_t *parent, obs_source_t *child, void *param)
-{
-	UNUSED_PARAMETER(parent);
-
-	struct set_enabled_ctx *ctx = param;
-	const char *name = obs_source_get_name(child);
-	if (!streq(name, ctx->name) || !is_controlled_filter(ctx->f, child))
-		return;
-
-	obs_source_set_enabled(child, ctx->enabled);
-	order_set_enabled(ctx->f, name, ctx->enabled);
 }
 
 static void set_filter_enabled_by_name(struct filter_vis *f, const char *name, bool enabled)
 {
-	if (!f->parent_src || !name || !*name)
+	if (!name || !*name)
 		return;
 
-	struct set_enabled_ctx ctx = { f, name, enabled };
-	obs_source_enum_filters(f->parent_src, set_enabled_by_name_cb, &ctx);
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
+		return;
+
+	obs_source_t *child = obs_source_get_filter_by_name(parent, name);
+	obs_source_release(parent);
+	if (!child)
+		return;
+
+	if (is_controlled_filter(f, child)) {
+		const char *child_name = obs_source_get_name(child);
+		obs_source_set_enabled(child, enabled);
+		order_set_enabled(f, child_name, enabled);
+	}
+
+	obs_source_release(child);
 }
 
 struct hide_others_ctx {
 	struct filter_vis *f;
 	const char *keep_name;
+	struct name_list *to_hide;
 };
 
 static void hide_others_cb(obs_source_t *parent, obs_source_t *child, void *param)
@@ -323,17 +366,14 @@ static void hide_others_cb(obs_source_t *parent, obs_source_t *child, void *para
 	if (streq(name, ctx->keep_name))
 		return;
 
-	if (obs_source_enabled(child)) {
-		obs_source_set_enabled(child, false);
-		order_set_enabled(ctx->f, name, false);
-		order_remove(ctx->f, name);
-	}
+	if (obs_source_enabled(child))
+		name_list_add(ctx->to_hide, name);
 }
 
 struct oldest_ctx {
 	struct filter_vis *f;
 	const char *keep_name;
-	const char *found_name;
+	char *found_name;
 	uint64_t found_since;
 };
 
@@ -352,35 +392,80 @@ static void find_oldest_cb(obs_source_t *parent, obs_source_t *child, void *para
 	int idx = order_find(ctx->f, name);
 	uint64_t since = idx >= 0 ? ctx->f->order[idx].since_ns : 0;
 	if (!ctx->found_name || since < ctx->found_since) {
-		ctx->found_name = name;
+		bfree(ctx->found_name);
+		ctx->found_name = bstrdup(name);
 		ctx->found_since = since;
 	}
 }
 
 static void apply_on_enable(struct filter_vis *f, const char *enabled_name)
 {
-	if (!f->parent_src || !enabled_name)
+	if (!enabled_name)
+		return;
+
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
 		return;
 
 	order_touch(f, enabled_name);
 	f->applying = true;
 
 	if (streq(f->mode, MODE_EXCLUSIVE)) {
-		struct hide_others_ctx ctx = { f, enabled_name };
-		obs_source_enum_filters(f->parent_src, hide_others_cb, &ctx);
+		struct name_list to_hide = { 0 };
+		struct hide_others_ctx ctx = { f, enabled_name, &to_hide };
+		obs_source_enum_filters(parent, hide_others_cb, &ctx);
+		for (size_t i = 0; i < to_hide.count; i++) {
+			set_filter_enabled_by_name(f, to_hide.names[i], false);
+			order_remove(f, to_hide.names[i]);
+		}
+		name_list_clear(&to_hide);
 	} else if (streq(f->mode, MODE_MAX_N)) {
 		int max_n = f->max_n < 1 ? 1 : f->max_n;
 		while (count_active(f) > max_n) {
 			struct oldest_ctx ctx = { f, enabled_name, NULL, 0 };
-			obs_source_enum_filters(f->parent_src, find_oldest_cb, &ctx);
+			obs_source_enum_filters(parent, find_oldest_cb, &ctx);
 			if (!ctx.found_name)
 				break;
 			set_filter_enabled_by_name(f, ctx.found_name, false);
 			order_remove(f, ctx.found_name);
+			bfree(ctx.found_name);
 		}
 	}
 
+	obs_source_release(parent);
 	f->applying = false;
+}
+
+static void apply_current_policy(struct filter_vis *f)
+{
+	if (!f || !obs_source_enabled(f->self))
+		return;
+
+	int limit = 0;
+	if (streq(f->mode, MODE_EXCLUSIVE))
+		limit = 1;
+	else if (streq(f->mode, MODE_MAX_N))
+		limit = f->max_n < 1 ? 1 : f->max_n;
+	else
+		return;
+
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
+		return;
+
+	f->applying = true;
+	while (count_active(f) > limit) {
+		struct oldest_ctx ctx = { f, NULL, NULL, 0 };
+		obs_source_enum_filters(parent, find_oldest_cb, &ctx);
+		if (!ctx.found_name)
+			break;
+		set_filter_enabled_by_name(f, ctx.found_name, false);
+		order_remove(f, ctx.found_name);
+		bfree(ctx.found_name);
+	}
+	f->applying = false;
+
+	obs_source_release(parent);
 }
 
 static void apply_on_disable(struct filter_vis *f, const char *disabled_name)
@@ -415,8 +500,11 @@ static void detect_change_cb(obs_source_t *parent, obs_source_t *child, void *pa
 
 	if (idx < 0) {
 		order_set_enabled(f, name, enabled);
-		if (enabled)
+		if (enabled) {
 			order_touch(f, name);
+			ctx->changed_name = bstrdup(name);
+			ctx->changed_enabled = true;
+		}
 		return;
 	}
 
@@ -435,6 +523,7 @@ static const char *fv_get_name(void *unused)
 static void fv_update(void *data, obs_data_t *settings)
 {
 	struct filter_vis *f = data;
+	pthread_mutex_lock(&f->state_mutex);
 
 	bfree(f->mode);
 	f->mode = bstrdup(obs_data_get_string(settings, "mode"));
@@ -457,11 +546,17 @@ static void fv_update(void *data, obs_data_t *settings)
 
 	refresh_selected_from_settings(f, settings);
 	rebuild_snapshot(f);
+	apply_current_policy(f);
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void *fv_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct filter_vis *f = bzalloc(sizeof(struct filter_vis));
+	if (!init_recursive_mutex(&f->state_mutex)) {
+		bfree(f);
+		return NULL;
+	}
 	f->self = source;
 	f->mode = bstrdup(MODE_EXCLUSIVE);
 	f->control_mode = bstrdup(CONTROL_ALL_EXCEPT_SELECTED);
@@ -474,7 +569,10 @@ static void *fv_create(obs_data_t *settings, obs_source_t *source)
 static void fv_filter_add(void *data, obs_source_t *parent)
 {
 	struct filter_vis *f = data;
-	f->parent_src = parent;
+	pthread_mutex_lock(&f->state_mutex);
+	if (f->parent_src)
+		obs_weak_source_release(f->parent_src);
+	f->parent_src = obs_source_get_weak_source(parent);
 
 	obs_data_t *settings = obs_source_get_settings(f->self);
 	if (settings) {
@@ -482,7 +580,9 @@ static void fv_filter_add(void *data, obs_source_t *parent)
 		obs_data_release(settings);
 	} else {
 		rebuild_snapshot(f);
+		apply_current_policy(f);
 	}
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void fv_filter_remove(void *data, obs_source_t *parent)
@@ -490,11 +590,16 @@ static void fv_filter_remove(void *data, obs_source_t *parent)
 	UNUSED_PARAMETER(parent);
 
 	struct filter_vis *f = data;
-	f->parent_src = NULL;
+	pthread_mutex_lock(&f->state_mutex);
+	if (f->parent_src) {
+		obs_weak_source_release(f->parent_src);
+		f->parent_src = NULL;
+	}
 	selected_clear(f);
 	order_clear(f);
 	bfree(f->pending_restore_name);
 	f->pending_restore_name = NULL;
+	pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void fv_destroy(void *data)
@@ -503,11 +608,16 @@ static void fv_destroy(void *data)
 	if (!f)
 		return;
 
+	pthread_mutex_lock(&f->state_mutex);
 	selected_clear(f);
 	order_clear(f);
+	if (f->parent_src)
+		obs_weak_source_release(f->parent_src);
 	bfree(f->pending_restore_name);
 	bfree(f->mode);
 	bfree(f->control_mode);
+	pthread_mutex_unlock(&f->state_mutex);
+	pthread_mutex_destroy(&f->state_mutex);
 	bfree(f);
 }
 
@@ -559,6 +669,8 @@ static obs_properties_t *fv_properties(void *data)
 {
 	struct filter_vis *f = data;
 	obs_properties_t *props = obs_properties_create();
+	if (f)
+		pthread_mutex_lock(&f->state_mutex);
 
 	obs_properties_add_text(props, "info", obs_module_text("FilterVisibilityInfo"),
 				OBS_TEXT_INFO);
@@ -584,9 +696,11 @@ static obs_properties_t *fv_properties(void *data)
 				     CONTROL_ONLY_SELECTED);
 
 	obs_properties_t *selection = obs_properties_create();
-	if (f && f->parent_src) {
+	obs_source_t *parent = get_parent_ref(f);
+	if (parent) {
 		struct props_ctx ctx = { f, selection };
-		obs_source_enum_filters(f->parent_src, add_filter_checkbox_cb, &ctx);
+		obs_source_enum_filters(parent, add_filter_checkbox_cb, &ctx);
+		obs_source_release(parent);
 	} else {
 		obs_properties_add_text(selection, "no_parent",
 					obs_module_text("FilterVisibilityNoParent"),
@@ -595,6 +709,8 @@ static obs_properties_t *fv_properties(void *data)
 	obs_properties_add_group(props, "filter_selection", obs_module_text("FilterSelection"),
 				 OBS_GROUP_NORMAL, selection);
 
+	if (f)
+		pthread_mutex_unlock(&f->state_mutex);
 	return props;
 }
 
@@ -603,8 +719,10 @@ static void fv_video_tick(void *data, float seconds)
 	UNUSED_PARAMETER(seconds);
 
 	struct filter_vis *f = data;
+	if (f)
+		pthread_mutex_lock(&f->state_mutex);
 	if (!f || !f->parent_src || !obs_source_enabled(f->self))
-		return;
+		goto done;
 
 	if (f->pending_restore_name) {
 		f->applying = true;
@@ -615,16 +733,20 @@ static void fv_video_tick(void *data, float seconds)
 		bfree(f->pending_restore_name);
 		f->pending_restore_name = NULL;
 		rebuild_snapshot(f);
-		return;
+		goto done;
 	}
 
 	if (f->applying)
-		return;
+		goto done;
 
 	struct detect_ctx ctx = { f, NULL, false };
-	obs_source_enum_filters(f->parent_src, detect_change_cb, &ctx);
+	obs_source_t *parent = get_parent_ref(f);
+	if (!parent)
+		goto done;
+	obs_source_enum_filters(parent, detect_change_cb, &ctx);
+	obs_source_release(parent);
 	if (!ctx.changed_name)
-		return;
+		goto done;
 
 	if (ctx.changed_enabled)
 		apply_on_enable(f, ctx.changed_name);
@@ -633,6 +755,10 @@ static void fv_video_tick(void *data, float seconds)
 
 	bfree(ctx.changed_name);
 	rebuild_snapshot(f);
+
+done:
+	if (f)
+		pthread_mutex_unlock(&f->state_mutex);
 }
 
 static void fv_video_render(void *data, gs_effect_t *effect)
@@ -645,7 +771,7 @@ static void fv_video_render(void *data, gs_effect_t *effect)
 struct obs_source_info dynamic_filter_visibility_filter_info = {
 	.id = FILTER_VISIBILITY_ID,
 	.type = OBS_SOURCE_TYPE_FILTER,
-	.output_flags = OBS_SOURCE_VIDEO,
+	.output_flags = OBS_SOURCE_VIDEO | OBS_SOURCE_CUSTOM_DRAW,
 	.get_name = fv_get_name,
 	.create = fv_create,
 	.destroy = fv_destroy,

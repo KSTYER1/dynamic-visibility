@@ -6,7 +6,7 @@ Dynamic Visibility
 
 ## Version
 
-1.1.0
+1.1.1
 
 ## Category
 
@@ -38,13 +38,13 @@ https://github.com/KSTYER1/dynamic-visibility
 
 ## Download URL
 
-https://github.com/KSTYER1/dynamic-visibility/releases/tag/v1.1.0
+https://github.com/KSTYER1/dynamic-visibility/releases/tag/v1.1.1
 
 ## Overview
 
 Dynamic Visibility is an unofficial third-party OBS Studio filter plugin. It
-adds two filters: `Source Visibility` for scene/group items and
-`Filter Visibility` for filters on the same source.
+adds two filters: `Dynamic Visibility Source` for scene/group items and
+`Dynamic Visibility Filter` for filters on the same source.
 
 ## Features
 
